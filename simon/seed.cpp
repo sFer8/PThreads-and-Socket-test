@@ -10,6 +10,8 @@
 #include <map>
 #include <set>
 #include <algorithm>
+#include <cstdlib>
+#include <random>
 
 #include "./lib/fileManager.h"
 #include "./lib/hostDataTransfer.h"
@@ -178,6 +180,7 @@ int main() {
     myFile file;
     pThread pThreads;
     clientDataTransfer client;
+    srand(time(0));
 
     ctx.server_fd = -1;
     pthread_mutex_init(&ctx.lock, nullptr);
@@ -187,9 +190,14 @@ int main() {
 
     std::map<std::string, std::vector<int>> filePresence;
     std::map<std::string, std::string> fileIdMap;
+    std::map<std::string, int> fileSizeMap;
+
     int userInput = 0;
     while (true) {
+        int noOfClientsWithFile = 0, numberOfChunks = 0;
+
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
         printMenu();
         std::cin >> userInput;
         std::cout << std::endl;
@@ -197,7 +205,6 @@ int main() {
         if (userInput == 1) {
             const char* cmd = "1";
 
-            //added stuff
             pthread_mutex_lock(&ctx.lock);
             ctx.clientData.clear();
             pthread_mutex_unlock(&ctx.lock);
@@ -209,11 +216,11 @@ int main() {
             for (int sock : ctx.clients) {
                 send(sock, cmd, strlen(cmd), 0);
             }
-            //added
             pthread_mutex_unlock(&ctx.lock);
 
             //std::this_thread::sleep_for(std::chrono::milliseconds(200));
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            std::cout << "Searching for files.. ";
             while (true) {
                 pthread_mutex_lock(&ctx.lock);
                 size_t gotResponses = ctx.clientData.size();
@@ -225,9 +232,10 @@ int main() {
 
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
+            std::cout << "done." << std::endl;
 
             std::set<std::string> uniqueFiles;
-            std::cout << "Merged file list (unique):" << std::endl;
+            std::cout << "Files available." << std::endl;
             for (std::map<int, std::vector<std::vector<std::string>>>::iterator it = ctx.clientData.begin();
                 it != ctx.clientData.end(); ++it) 
             {
@@ -242,10 +250,12 @@ int main() {
                         }
 
                         std::string fileId = row[0];
-                        std::string filename = row[1];
-                        std::string key = fileId + "|" + filename;
+                        std::string fileName = row[1];
+                        std::string fileSize = row[2];
+                        std::string key = fileId + "|" + fileName;
 
                         fileIdMap[key] = fileId;
+                        fileSizeMap[key] = stoi(fileSize);
 
                         if (filePresence.find(key) == filePresence.end()) {
                             filePresence[key] = std::vector<int>(ctx.clients.size(), 0);
@@ -270,25 +280,127 @@ int main() {
             for (auto& kv : filePresence) {
                 std::string key = kv.first;
                 std::string id = fileIdMap[key];
-                std::string filename = key.substr(key.find("|") + 1);
+                std::string fileName = key.substr(key.find("|") + 1);
 
-                std::cout << id << "\t" << filename << "\t";
+                std::cout << "[" << id << "]" << "\t" << fileName << "\t";
                 for (int v : kv.second) {
                     std::cout << v << "\t";
                 }
                 std::cout << "\n";
             }
+
+            //std::cout << << endl;
             //pthread_mutex_unlock(&ctx.lock);
 
         }
         else if (userInput == 2) {
-            //download the files
-            //inclide receiving file information
-            //assign which random packets to download from which client
+            string fileID = "0";
+            const char* cmd = "2";
+
+            pthread_mutex_lock(&ctx.lock);
+            ctx.clientData.clear();
+            pthread_mutex_unlock(&ctx.lock);
+
+            pthread_mutex_lock(&ctx.lock);
+            for (int sock : ctx.clients) {
+                send(sock, cmd, strlen(cmd), 0);
+            }
+            pthread_mutex_unlock(&ctx.lock);
+
+            std::cout << "Enter File ID: ";
+            std::cin >> fileID;
+
+            //std::cout << "clients:  ";
+            // for (size_t i = 0; i < ctx.clients.size(); i++) {
+            //     //std::cout << ctx.clients[i] << "\t";
+            // }
+            std::cout << std::endl;
+            for (const auto& elementInMap : fileIdMap) {
+                if (elementInMap.second == fileID) { 
+                    //std::cout << elementInMap.first.substr(elementInMap.first.find("|") + 1) << "       ";
+                    
+                    for (int presence : filePresence[elementInMap.first]) {
+                        //std::cout << presence << "\t";
+                        noOfClientsWithFile += presence;
+                    }
+                    std::cout << "Download for File: [" << fileID << "] " << elementInMap.first.substr(elementInMap.first.find("|") + 1) << " is already started." << std::endl; 
+                    std::cout << "Found " << noOfClientsWithFile << " Client(s) with the file." << endl;
+                    std::cout << std::endl;
+
+                    //std::cout << "File size in bytes: " << fileSizeMap[elementInMap.first] << std::endl;
+                    numberOfChunks = fileSizeMap[elementInMap.first]/32;
+                    //std::cout << "Number of 32 byte packets: " << numberOfChunks << std::endl;
+
+                    //int assignedChunksPerClient[noOfClientsWithFile][(numberOfChunks/noOfClientsWithFile)];
+                    vector<int> values;
+                    for (int i = 0; i <= numberOfChunks; ++i) {
+                        values.push_back(i);
+                    }
+
+                    std::random_device rd;
+                    std::mt19937 g(rd());
+                    std::shuffle(values.begin(), values.end(), g);
+
+                    vector<vector<int>> groups(noOfClientsWithFile);
+                    for (size_t i = 0; i < values.size(); ++i) {
+                        groups[i % noOfClientsWithFile].push_back(values[i]);
+                    }
+
+                    for (int i = 0; i < noOfClientsWithFile; ++i) {
+                        std::cout << "Group " << i + 1 << ": ";
+                        for (int val : groups[i]) {
+                            std::cout << val << " ";
+                        }
+                        std::cout << std::endl;
+                    }
+
+                    pthread_mutex_lock(&ctx.lock);
+                    int groupIndex = 0;
+                    for (size_t i = 0; i < ctx.clients.size(); ++i) {
+                        int sock = ctx.clients[i];
+                        if (filePresence[elementInMap.first][i] == 1) {
+                            std::ostringstream oss;
+                            oss << fileID << "|";
+                            for (int chunk : groups[groupIndex]) {
+                                oss << chunk << ",";
+                            }
+                            std::string message = oss.str();
+                            message.pop_back(); // remove trailing comma
+
+                            send(sock, message.c_str(), message.size(), 0);
+                            groupIndex++;
+                        }
+                    }
+                    pthread_mutex_unlock(&ctx.lock);
+
+                    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                    std::cout << "Searching for files.. ";
+                    while (true) {
+                        pthread_mutex_lock(&ctx.lock);
+                        size_t gotResponses = ctx.clientData.size();
+                        size_t expected = ctx.clients.size();
+                        pthread_mutex_unlock(&ctx.lock);
+
+                        if (gotResponses >= expected) break;
+                        if (std::chrono::steady_clock::now() > deadline) break;
+
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                    std::cout << "done." << std::endl;
+
+                    break;
+                }
+            }
+            //pthread to receive download files
+            //receive chunks <file ID>, <chunk number>, <32 byte data>
+            //count number of chunks received
+            //write out the chunks
+
         }
         else if (userInput == 3) {
-            //save number of packets from 2
-            //save number of packets received
+            //reference number of packets received from 2
+            //multiply by 32 bytes
+            //print
         }
         else if (userInput == 4) {
             std::cout << "Closing server..." << std::endl;

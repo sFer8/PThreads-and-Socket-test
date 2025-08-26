@@ -62,7 +62,7 @@ int main()
 
     int userInput = 0;
     while(true) {
-        char buffer[1024] = { 0 };
+        char buffer[1024] = { 0 }; //increase to accept more data later
         int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
         if(bytesReceived <= 0) {
             continue;
@@ -85,8 +85,57 @@ int main()
                 send(clientSocket, serialized.c_str(), serialized.size(), 0);
             }
             if(userInput == 2) {
-                //download using file lib
-                //look up fseek
+                char chunkAssignmentBuffer[2048] = { 0 }; //increase to accept more data later
+                while(true) {
+                    int chunkAssignmentReceived = recv(clientSocket, chunkAssignmentBuffer, sizeof(chunkAssignmentBuffer), 0);
+                    if (chunkAssignmentReceived <= 0) {
+                        continue;
+                    }
+
+                    chunkAssignmentBuffer[chunkAssignmentReceived] = '\0'; // null terminate
+                    std::string assignmentStr(chunkAssignmentBuffer);
+
+                    // Example string: "1|22,23,203,187"
+                    size_t sepPos = assignmentStr.find('|');
+                    if (sepPos == std::string::npos) {
+                        std::cerr << "Invalid format: " << assignmentStr << std::endl;
+                        continue;
+                    }
+
+                    // Split into ID and chunk list
+                    std::string idString = assignmentStr.substr(0, sepPos);
+                    std::string chunksString = assignmentStr.substr(sepPos + 1);
+
+                    int id = std::stoi(idString);
+
+                    std::vector<int> chunks;
+                    size_t pos = 0;
+                    while ((pos = chunksString.find(',')) != std::string::npos) {
+                        chunks.push_back(std::stoi(chunksString.substr(0, pos)));
+                        chunksString.erase(0, pos + 1);
+                    }
+                    if (!chunksString.empty()) {
+                        chunks.push_back(std::stoi(chunksString));
+                    }
+
+                    std::cout << "ID: " << id << std::endl;
+                    std::cout << "Chunks: ";
+                    for (int c : chunks) {
+                        std::cout << c << " ";
+                    }
+                    std::cout << std::endl;
+
+                    while (true) {
+                        for (int c : chunks) {
+                            //add chunk number and ID so that it can be sent to the right place
+                            std::vector<std::string> chunkParts = file.getChunk(filePath.c_str(), c);
+
+                            for (const std::string& part : chunkParts) {
+                                send(clientSocket, part.data(), part.size(), 0);
+                            }
+                        }
+                    }
+                }
             }
             if(userInput == 3) {
                 //download status

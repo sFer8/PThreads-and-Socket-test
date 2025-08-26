@@ -8,7 +8,7 @@
 #include <chrono>
 #include <thread>
 
-//g++ -std=c++11 clientTest2.cpp ./lib/fileManager.cpp -lstdc++fs -o client2
+//g++ -std=c++11 clientTest4.cpp ./lib/fileManager.cpp -lstdc++fs -o client4
 
 #include "./lib/fileManager.h"
 
@@ -18,7 +18,7 @@ string serialize2DVector(const vector<vector<string>>& vec);
 int main()
 {
     myFile file;
-    string filePath = "./DummyFiles/seed2";
+    string filePath = "./DummyFiles/seed4";
     // creating socket
     int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
     int PORTS[5] = {8080, 8081, 8082, 8083, 8084};

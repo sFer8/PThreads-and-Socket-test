@@ -8,7 +8,7 @@
 #include <chrono>
 #include <thread>
 
-//g++ -std=c++11 clientTest.cpp ./lib/fileManager.cpp -lstdc++fs -o client
+//g++ -std=c++11 clientTest1.cpp ./lib/fileManager.cpp -lstdc++fs -o client1
 
 #include "./lib/fileManager.h"
 

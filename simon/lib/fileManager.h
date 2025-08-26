@@ -21,6 +21,7 @@ class myFile{
         vector<string> getFileList(string filePath);
         vector<vector<string>> getIDFileList(string filePath);
         int checkFolderForFiles(const string& folderPath, int& result);
+        vector<string> getChunk(const char*  filePath, int chunkNumber);
 };
 
 #endif

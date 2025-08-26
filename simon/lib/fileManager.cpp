@@ -1,5 +1,6 @@
 #include "fileManager.h"
 #include <iostream>
+#include <cstring>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -75,5 +76,34 @@ int myFile::checkFolderForFiles(const string& folderPath, int& result) {
         return 0;
     }
     return 1;
+}
+
+vector<string> myFile::getChunk(const char*  filePath, int chunkNumber) {
+    vector<string> dataChunk;
+    fptr = fopen(filePath, "rb");
+
+    fseek(fptr, 0, SEEK_END);
+    int fileSize = ftell(fptr);
+    rewind(fptr);
+
+
+    long offset = chunkNumber * 32;
+    size_t dataSize = 32;
+    char buffer[33] = {0};
+
+    memset(buffer, 0, sizeof(buffer));
+
+    if (fseek(fptr, offset, SEEK_SET) != 0) {
+        std::cerr << "Error: Unable to seek to the specified offset!" << std::endl;
+        fclose(fptr);
+    }
+
+    size_t bytesRead = fread(buffer, 1, dataSize, fptr);
+    dataChunk.push_back(to_string(chunkNumber));
+    dataChunk.push_back({buffer});
+    
+
+    fclose(fptr);
+    return dataChunk;
 }
 
