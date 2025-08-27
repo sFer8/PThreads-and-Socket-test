@@ -7,10 +7,39 @@
 #include <string>
 #include <chrono>
 #include <thread>
+#include <errno.h>
 
 //g++ -std=c++11 clientTest.cpp ./lib/fileManager.cpp -lstdc++fs -o client
 
 #include "./lib/fileManager.h"
+
+#pragma pack(push, 1)   // disable padding
+struct ChunkPacketHeader {
+    int fileID;
+    int chunkNumber;
+    int dataSize;
+};
+#pragma pack(pop)
+
+ssize_t recvAll_client(int sock, void* buffer, size_t length) {
+    size_t total = 0;
+    char* buf = static_cast<char*>(buffer);
+    while (total < length) {
+        ssize_t bytes = recv(sock, buf + total, length - total, 0);
+        if (bytes > 0) {
+            total += bytes;
+            continue;
+        }
+        if (bytes == 0) return 0; // peer closed
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        return -1;
+    }
+    return static_cast<ssize_t>(total);
+}
 
 void printFileList(vector<vector<string>> listOfIDNames);
 string serialize2DVector(const vector<vector<string>>& vec);
@@ -27,38 +56,29 @@ int main()
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
 
-    int x = 0;
-    while(true) {
-        int i = 0;
+    bool isNotConnected = 1;
+    while(isNotConnected) {
+        int x = 0;
         while(true) {
-            serverAddress.sin_port = htons(PORTS[i]);
+            serverAddress.sin_port = htons(PORTS[x]);
             serverAddress.sin_addr.s_addr = INADDR_ANY;
 
             // sending connection request
             if (connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) == 0) {
-                std::cout << "client is starting at port " << PORTS[i] << std::endl;
+                std::cout << "client is starting at port " << PORTS[x] << std::endl;
+                isNotConnected = 0;
                 break;
             } else {
                 perror("connect");
             }
-            i++;
-            if(i >= (sizeof(PORTS) / sizeof(PORTS[0]))) {
+            x++;
+            if(x >= (sizeof(PORTS) / sizeof(PORTS[0]))) {
                 std::cout << "No port found" << std::endl;
                 break;
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        x++;
-        if(x >= 10) {
-            break;
-        }
     }
-    
-
-    
-    // sending data
-    // const char* message = "";
-    // send(clientSocket, message, strlen(message), 0);
 
     int userInput = 0;
     while(true) {
@@ -92,17 +112,15 @@ int main()
                         continue;
                     }
 
-                    chunkAssignmentBuffer[chunkAssignmentReceived] = '\0'; // null terminate
+                    chunkAssignmentBuffer[chunkAssignmentReceived] = '\0';
                     std::string assignmentStr(chunkAssignmentBuffer);
 
-                    // Example string: "1|22,23,203,187"
                     size_t sepPos = assignmentStr.find('|');
                     if (sepPos == std::string::npos) {
                         std::cerr << "Invalid format: " << assignmentStr << std::endl;
                         continue;
                     }
 
-                    // Split into ID and chunk list
                     std::string idString = assignmentStr.substr(0, sepPos);
                     std::string chunksString = assignmentStr.substr(sepPos + 1);
 
@@ -125,16 +143,61 @@ int main()
                     }
                     std::cout << std::endl;
 
-                    while (true) {
-                        for (int c : chunks) {
-                            //add chunk number and ID so that it can be sent to the right place
-                            std::vector<std::string> chunkParts = file.getChunk(filePath.c_str(), c);
+                    for (int c : chunks) {
+                        std::vector<char> chunkData = file.getChunk(filePath.c_str(), id, c);
 
-                            for (const std::string& part : chunkParts) {
-                                send(clientSocket, part.data(), part.size(), 0);
+                        ChunkPacketHeader header;
+                        header.fileID = htonl(id);
+                        header.chunkNumber = htonl(c);
+                        header.dataSize = htonl((int)chunkData.size());
+
+                        auto sendAll = [](int sock, const void* buf, size_t len) -> bool {
+                            size_t total = 0;
+                            const char* p = static_cast<const char*>(buf);
+                            while (total < len) {
+                                ssize_t sent = send(sock, p + total, len - total, 0);
+                                if (sent <= 0) return false;
+                                total += sent;
                             }
+                            return true;
+                        };
+
+                        if (!sendAll(clientSocket, &header, sizeof(header))) {
+                            std::cerr << "[ERROR] Failed to send full header\n";
+                            break;
+                        }
+                        if (!chunkData.empty() && !sendAll(clientSocket, chunkData.data(), chunkData.size())) {
+                            std::cerr << "[ERROR] Failed to send full chunk\n";
+                            break;
+                        }
+
+                        // --- WAIT FOR SERVER ACK ---
+                        char ackBuf[4] = {0}; // 3 bytes + null
+                        ssize_t ackRecv = recvAll_client(clientSocket, ackBuf, 3);
+                        if (ackRecv == 3) {
+                            ackBuf[3] = '\0';
+                            if (std::string(ackBuf) == "ACK") {
+                                std::cout << "[DEBUG] ACK received for chunk " << c << std::endl;
+                            } else {
+                                std::cerr << "[WARN] Got non-ACK '" << std::string(ackBuf, ackRecv) << "'\n";
+                            }
+                        } else if (ackRecv == 0) {
+                            std::cerr << "[ERROR] Server closed connection while waiting for ACK\n";
+                            break;
+                        } else {
+                            std::cerr << "[ERROR] recvAll_client for ACK returned " << ackRecv
+                                    << " (errno=" << errno << ")\n";
+                            break;
                         }
                     }
+
+                    ChunkPacketHeader endHeader;
+                    endHeader.fileID = htonl(id);
+                    endHeader.chunkNumber = htonl(-1);
+                    endHeader.dataSize = htonl(0);
+                    send(clientSocket, &endHeader, sizeof(endHeader), 0);
+                                            
+                    break;
                 }
             }
             if(userInput == 3) {

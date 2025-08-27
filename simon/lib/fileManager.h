@@ -16,12 +16,13 @@ class myFile{
 
     public:
         void writeToFile(const char* fileName, const char* message);
-        void appendToFile(const char* fileName, const char* message);
+        //void appendToFile(const char* fileName, const char* message);
         char* readFromFile(const char* fileName);
         vector<string> getFileList(string filePath);
         vector<vector<string>> getIDFileList(string filePath);
         int checkFolderForFiles(const string& folderPath, int& result);
-        vector<string> getChunk(const char*  filePath, int chunkNumber);
+        std::vector<char> getChunk(const char* basePath, int fileID, int chunkNumber);
+        void appendToFile(const char* fileName, const char* data, size_t dataSize, const char* basePath, int fileID, int chunkNumber);
 };
 
 #endif
