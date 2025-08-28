@@ -14,6 +14,7 @@
 #include <random>
 #include <iomanip>
 #include <errno.h>
+#include <sstream>
 
 #include "./lib/fileManager.h"
 #include "./lib/hostDataTransfer.h"
@@ -21,17 +22,24 @@
 #include "./lib/pThread.h"
 
 //g++ -std=c++11 -lpthread seed.cpp ./lib/fileManager.cpp ./lib/hostDataTransfer.cpp ./lib/clientDataTransfer.cpp ./lib/pThread.cpp -lstdc++fs -o seed
-//g++ -std=c++11 seed.cpp ./lib/fileManager.cpp ./lib/hostDataTransfer.cpp ./lib/clientDataTransfer.cpp ./lib/pThread.cpp -lstdc++fs -lpthread -o seed
-
 
 struct ServerContext {
     int server_fd;
     vector<int> clients;
     pthread_mutex_t lock;
     std::map<int, vector<vector<string>>> clientData;
-
-    // NEW: per-socket flag: only allow createListen() to read when true
     std::map<int, bool> expectingList;
+};
+
+struct DownloadArgs {
+    std::string fileID;
+    ServerContext* ctx;
+    std::map<std::string, std::string>* fileIdMap;
+    std::map<std::string, std::vector<int>>* filePresence;
+    std::map<std::string, int>* fileSizeMap;
+    std::vector<std::vector<std::string>>* downloadStatus;
+    std::string filePath;
+    myFile* file;
 };
 
 ServerContext ctx;
@@ -44,6 +52,7 @@ struct ChunkPacketHeader {
 };
 #pragma pack(pop)
 
+
 ssize_t recvAll(int sock, void* buffer, size_t length) {
     size_t total = 0;
     char* buf = static_cast<char*>(buffer);
@@ -54,20 +63,31 @@ ssize_t recvAll(int sock, void* buffer, size_t length) {
             continue;
         }
         if (bytes == 0) {
-            // peer closed connection
             return 0;
         }
-        // bytes < 0: error
         if (errno == EINTR) {
-            continue; // interrupted, retry
+            continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // temporary, wait a little and retry
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
             continue;
         }
-        // unrecoverable error
         return -1;
+    }
+    return static_cast<ssize_t>(total);
+}
+
+ssize_t sendAll(int sock, const void* buf, size_t len) {
+    size_t total = 0;
+    const char* p = static_cast<const char*>(buf);
+    while (total < len) {
+        ssize_t n = send(sock, p + total, len - total, 0);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) return static_cast<ssize_t>(total);
+        total += static_cast<size_t>(n);
     }
     return static_cast<ssize_t>(total);
 }
@@ -77,7 +97,7 @@ vector<vector<string>> deserializeVector(const string& data) {
     std::stringstream ss(data);
     string line;
 
-    while (std::getline(ss, line)) { 
+    while (std::getline(ss, line)) {
         if (line.empty()) continue;
         std::stringstream rowStream(line);
         string col;
@@ -93,7 +113,6 @@ vector<vector<string>> deserializeVector(const string& data) {
 
 void* createListen(void* inClientSocket) {
     int clientSocket = *((int*)inClientSocket);
-
     char buffer[1024] = { 0 };
     while(true) {
         bool shouldRead = false;
@@ -103,21 +122,15 @@ void* createListen(void* inClientSocket) {
         pthread_mutex_unlock(&ctx.lock);
 
         if (!shouldRead) {
-            // Not expecting a file-list reply right now -> don't read because
-            // main thread might be doing the data transfer. Sleep briefly.
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
 
-        // Only read when expecting the listing
         int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
         if(bytesReceived <= 0) {
-            // keep waiting while expectingList is true; on error, break out
             if (bytesReceived == 0) {
-                // peer closed
                 break;
             }
-            // bytesReceived < 0: temporary error, continue
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
@@ -131,7 +144,6 @@ void* createListen(void* inClientSocket) {
         ctx.clientData[clientSocket] = vec2D;
         pthread_mutex_unlock(&ctx.lock);
 
-        // After we got a reply, set expectingList false so createListen stops reading
         pthread_mutex_lock(&ctx.lock);
         ctx.expectingList[clientSocket] = false;
         pthread_mutex_unlock(&ctx.lock);
@@ -175,33 +187,16 @@ void* createServer(void* arg) {
     address.sin_addr.s_addr = INADDR_ANY;
 
     std::cout << "Finding available ports... Found port ";
-    //change to for loop
     for(int i = 0; i < SIZEOF_ARR(PORTS); i++) {
         address.sin_port = htons(PORTS[i]);
         if (bind(ctx->server_fd, (struct sockaddr*)&address, sizeof(address)) == 0) {
-            //std::cout << PORTS[i] << std::endl;
+            std::cout << PORTS[i] << std::endl;
             std::cout << "Listening at port " << PORTS[i] << std::endl;
-            
+
             listen(ctx->server_fd, 10);
             break;
         }
     }
-
-    // int i = 0;
-    // while (true) {
-    //     address.sin_port = htons(PORTS[i]);
-    //     if (bind(ctx->server_fd, (struct sockaddr*)&address, sizeof(address)) == 0) {
-    //         std::cout << PORTS[i] << std::endl;
-            
-    //         listen(ctx->server_fd, 10);
-    //         break;
-    //     }
-    //     i++;
-    //     if (i >= (sizeof(PORTS) / sizeof(PORTS[0]))) {
-    //         std::cout << "No ports available.\n";
-    //         return nullptr;
-    //     }
-    // }
 
     while (true) {
         int client_fd = accept(ctx->server_fd, (struct sockaddr*)&address, &addrlen);
@@ -214,7 +209,6 @@ void* createServer(void* arg) {
         ctx->clients.push_back(client_fd);
         ctx->expectingList[client_fd] = false;
         pthread_mutex_unlock(&ctx->lock);
-
 
         pthread_t listenerThread;
         int* client_fd_ptr = new int(client_fd);
@@ -249,7 +243,6 @@ void* createClient(void* arg) {
 
         if (connect(client_fd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) == 0) {
             *out_fd = client_fd;
-
             break;
         }
         i++;
@@ -258,12 +251,148 @@ void* createClient(void* arg) {
             break;
         }
     }
-    
-  
+
     send(client_fd, hello, strlen(hello), 0);
-    valread = read(client_fd, buffer, 1024 - 1); 
+    valread = read(client_fd, buffer, 1024 - 1);
     printf("%s\n", buffer);
     return 0;
+}
+
+void* downloadFileThread(void* arg) {
+    DownloadArgs* args = static_cast<DownloadArgs*>(arg);
+    std::string fileID = args->fileID;
+    auto& fileIdMap = *args->fileIdMap;
+    auto& filePresence = *args->filePresence;
+    auto& fileSizeMap = *args->fileSizeMap;
+    auto& downloadStatus = *args->downloadStatus;
+    std::string filePath = args->filePath;
+    myFile& file = *args->file;
+
+    int noOfClientsWithFile = 0;
+    constexpr int CHUNK = 32;
+
+    for (const auto& elementInMap : fileIdMap) {
+        if (elementInMap.second == fileID) {
+            for (int presence : filePresence[elementInMap.first]) {
+                noOfClientsWithFile += presence;
+            }
+
+            std::cout << "Download for File: [" << fileID << "] "
+                      << elementInMap.first.substr(elementInMap.first.find("|") + 1)
+                      << " is already started.\nFound " << noOfClientsWithFile
+                      << " Client(s) with the file.\n\n";
+
+            int numberOfChunks = (fileSizeMap[elementInMap.first] + CHUNK - 1) / CHUNK;
+            std::vector<int> values(numberOfChunks);
+            std::iota(values.begin(), values.end(), 0);
+            std::shuffle(values.begin(), values.end(), std::mt19937{std::random_device{}()});
+
+            std::vector<std::vector<int>> groups(noOfClientsWithFile);
+            for (size_t i = 0; i < values.size(); ++i) {
+                groups[i % noOfClientsWithFile].push_back(values[i]);
+            }
+
+            pthread_mutex_lock(&ctx.lock);
+            std::vector<int> eligibleClients;
+            for (size_t i = 0; i < ctx.clients.size(); ++i) {
+                if (filePresence[elementInMap.first][i] == 1) {
+                    eligibleClients.push_back(ctx.clients[i]);
+                }
+            }
+
+            for (size_t i = 0; i < eligibleClients.size(); ++i) {
+                std::ostringstream oss;
+                oss << fileID << "|";
+                for (int chunk : groups[i]) {
+                    oss << chunk << ",";
+                }
+                std::string message = oss.str();
+                if (!groups[i].empty()) {
+                    message.pop_back();
+                }
+                std::cout << "[DEBUG] Sending assignment to client " << eligibleClients[i] << ": " << message << std::endl;
+
+                ssize_t sent = sendAll(eligibleClients[i], message.c_str(), message.size());
+                if (sent != (ssize_t)message.size()) {
+                    std::cerr << "[ERROR] sendAll assignment to " << eligibleClients[i] << " returned " << sent << " errno=" << errno << std::endl;
+                }
+            }
+            pthread_mutex_unlock(&ctx.lock);
+
+            std::vector<int> senders;
+            for (size_t i = 0; i < ctx.clients.size(); ++i) {
+                if (filePresence[elementInMap.first][i] == 1) {
+                    senders.push_back(ctx.clients[i]);
+                }
+            }
+
+            timeval tv{0, 200000};
+            for (int s : senders) {
+                setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            }
+
+            std::string realName = elementInMap.first.substr(elementInMap.first.find("|") + 1);
+            downloadStatus.push_back({realName, "0"});
+
+            std::set<int> done;
+            size_t remaining = senders.size();
+            while (remaining > 0) {
+                for (int sock : senders) {
+                    if (done.count(sock)) continue;
+
+                    ChunkPacketHeader headerNet;
+                    ssize_t hbytes = recvAll(sock, &headerNet, sizeof(headerNet));
+                    if (hbytes <= 0) {
+                        done.insert(sock);
+                        --remaining;
+                        continue;
+                    }
+
+                    int32_t fileID = ntohl(headerNet.fileID);
+                    int32_t chunkNumber = ntohl(headerNet.chunkNumber);
+                    int32_t dataSize = ntohl(headerNet.dataSize);
+
+                    if (chunkNumber == -1 && dataSize == 0) {
+                        done.insert(sock);
+                        --remaining;
+                        continue;
+                    }
+
+                    std::vector<char> chunkData(dataSize);
+                    ssize_t totalReceived = recvAll(sock, chunkData.data(), dataSize);
+                    if (totalReceived != dataSize) {
+                        done.insert(sock);
+                        --remaining;
+                        continue;
+                    }
+
+                    file.appendToFile(realName.c_str(), chunkData.data(), totalReceived, filePath.c_str(), fileID, chunkNumber);
+
+                    for (auto& row : downloadStatus) {
+                        if (!row.empty() && row[0] == realName) {
+                            if (row.size() < 2) row.resize(2);
+                            row[1] = std::to_string(1 + std::stoi(row[1]));
+                            break;
+                        }
+                    }
+
+                    const char* ack = "ACK";
+                    ssize_t ackSent = sendAll(sock, ack, 3);
+                    if (ackSent != 3) {
+                        std::cerr << "[WARN] Failed to send full ACK to " << sock << " (sent=" << ackSent << ", errno=" << errno << "). Marking sender done.\n";
+                        done.insert(sock);
+                        if (remaining > 0) --remaining;
+                    } else {
+                        // std::cout << "[DEBUG] Sent ACK to " << sock << std::endl;
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    delete args;
+    return nullptr;
 }
 
 int main() {
@@ -280,6 +409,7 @@ int main() {
     pthread_t serverThread;
     pthread_create(&serverThread, nullptr, createServer, &ctx);
 
+    std::vector<std::vector<std::string>> downloadStatus;
     std::map<std::string, std::vector<int>> filePresence;
     std::map<std::string, std::string> fileIdMap;
     std::map<std::string, int> fileSizeMap;
@@ -306,12 +436,11 @@ int main() {
 
             pthread_mutex_lock(&ctx.lock);
             for (int sock : ctx.clients) {
-                ctx.expectingList[sock] = true;       // allow createListen to read reply
+                ctx.expectingList[sock] = true;
                 send(sock, cmd, strlen(cmd), 0);
             }
             pthread_mutex_unlock(&ctx.lock);
 
-            //std::this_thread::sleep_for(std::chrono::milliseconds(200));
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
             std::cout << "Searching for files.. ";
             while (true) {
@@ -336,7 +465,7 @@ int main() {
             std::set<std::string> uniqueFiles;
             std::cout << "Files available." << std::endl;
             for (std::map<int, std::vector<std::vector<std::string>>>::iterator it = ctx.clientData.begin();
-                it != ctx.clientData.end(); ++it) 
+                it != ctx.clientData.end(); ++it)
             {
                 int client = it->first;
                 const std::vector<std::vector<std::string>>& rows = it->second;
@@ -388,9 +517,40 @@ int main() {
                 std::cout << "\n";
             }
         }
+
         else if (userInput == 2) {
-            string fileID = "0";
+            std::string fileID;
             const char* cmd = "2";
+
+            pthread_mutex_lock(&ctx.lock);
+            ctx.clientData.clear();
+            for (int sock : ctx.clients) {
+                send(sock, cmd, strlen(cmd), 0);
+            }
+            pthread_mutex_unlock(&ctx.lock);
+
+            std::cout << "Enter File ID: ";
+            std::cin >> fileID;
+
+            auto* args = new DownloadArgs{
+                fileID, &ctx, &fileIdMap, &filePresence, &fileSizeMap,
+                &downloadStatus, filePath, &file
+            };
+
+            pthread_t threadID;
+            pthread_create(&threadID, nullptr, downloadFileThread, args);
+            pthread_detach(threadID);
+        }
+        else if (userInput == 3) {
+            std::cout << "\nDownload status:" << std::endl;
+            int i = 1;
+            for (const auto& row : downloadStatus) {
+                std::cout << "[" << i << "]" << row[0] << "  " << (atoi(row[1].c_str())*32) << " kb/" << "fileSize" << " kb" << std::endl;
+                i++;
+            }
+        }
+        else if (userInput == 4) {
+            const char* cmd = "4";
 
             pthread_mutex_lock(&ctx.lock);
             ctx.clientData.clear();
@@ -402,186 +562,6 @@ int main() {
             }
             pthread_mutex_unlock(&ctx.lock);
 
-            std::cout << "Enter File ID: ";
-            std::cin >> fileID;
-
-            std::cout << std::endl;
-            for (const auto& elementInMap : fileIdMap) {
-                if (elementInMap.second == fileID) { 
-                    //std::cout << elementInMap.first.substr(elementInMap.first.find("|") + 1) << "       ";
-                    
-                    for (int presence : filePresence[elementInMap.first]) {
-                        //std::cout << presence << "\t";
-                        noOfClientsWithFile += presence;
-                    }
-                    std::cout << "Download for File: [" << fileID << "] " << elementInMap.first.substr(elementInMap.first.find("|") + 1) << " is already started." << std::endl; 
-                    std::cout << "Found " << noOfClientsWithFile << " Client(s) with the file." << endl;
-                    std::cout << std::endl;
-
-                    constexpr int CHUNK = 32;
-                    numberOfChunks = (fileSizeMap[elementInMap.first] + CHUNK - 1) / CHUNK;
-                    vector<int> values;
-                    for (int i = 0; i < numberOfChunks; ++i) {
-                        values.push_back(i);
-                    }
-
-                    std::random_device rd;
-                    std::mt19937 g(rd());
-                    std::shuffle(values.begin(), values.end(), g);
-
-                    vector<vector<int>> groups(noOfClientsWithFile);
-                    for (size_t i = 0; i < values.size(); ++i) {
-                        groups[i % noOfClientsWithFile].push_back(values[i]);
-                    }
-
-                    for (int i = 0; i < noOfClientsWithFile; ++i) {
-                        std::cout << "Group " << i + 1 << ": ";
-                        for (int val : groups[i]) {
-                            std::cout << val << " ";
-                        }
-                        std::cout << std::endl;
-                    }
-
-                    pthread_mutex_lock(&ctx.lock);
-                    int groupIndex = 0;
-                    for (size_t i = 0; i < ctx.clients.size(); ++i) {
-                        int sock = ctx.clients[i];
-                        if (filePresence[elementInMap.first][i] == 1) {
-                            std::ostringstream oss;
-                            oss << fileID << "|";
-                            for (int chunk : groups[groupIndex]) {
-                                oss << chunk << ",";
-                            }
-                            std::string message = oss.str();
-                            message.pop_back(); // remove trailing comma
-
-                            send(sock, message.c_str(), message.size(), 0);
-                            groupIndex++;
-                        }
-                    }
-                    pthread_mutex_unlock(&ctx.lock);
-
-                    // Build the list of sockets that will actually send data for this file:
-                    std::vector<int> senders;
-                    for (size_t i = 0; i < ctx.clients.size(); ++i) {
-                        if (filePresence[elementInMap.first][i] == 1) {
-                            senders.push_back(ctx.clients[i]);
-                        }
-                    }
-
-                    // Short recv timeout so we don't block forever on one socket
-                    timeval tv;
-                    tv.tv_sec = 0;
-                    tv.tv_usec = 200000; // 200ms
-                    for (int s : senders) {
-                        setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-                    }
-
-
-                    // Use the real filename from the listing instead of hardcoding reconstructed.txt
-                    std::string realName = elementInMap.first.substr(elementInMap.first.find("|") + 1);
-
-                    std::set<int> done;                    // sockets that sent the end marker
-                    size_t remaining = senders.size();
-
-                    while (remaining > 0) {
-                        // loop senders in a snapshot (we remove failed senders via 'done')
-                        for (int sock : senders) {
-                            if (done.count(sock)) continue;
-
-                            // Read header (network order)
-                            ChunkPacketHeader headerNet;
-                            ssize_t hbytes = recvAll(sock, &headerNet, sizeof(headerNet));
-                            if (hbytes <= 0) {
-                                std::cerr << "[ERROR] Socket " << sock << " closed or failed while reading header (recvAll returned " << hbytes << "). Dropping sender.\n";
-                                done.insert(sock);
-                                if (remaining > 0) --remaining;
-                                continue; // skip this socket
-                            }
-
-                            // Convert header fields safely using uint32_t -> int32_t
-                            uint32_t net_fileID      = static_cast<uint32_t>(headerNet.fileID);
-                            uint32_t net_chunkNumber = static_cast<uint32_t>(headerNet.chunkNumber);
-                            uint32_t net_dataSize    = static_cast<uint32_t>(headerNet.dataSize);
-
-                            int32_t fileID      = static_cast<int32_t>(ntohl(net_fileID));
-                            int32_t chunkNumber = static_cast<int32_t>(ntohl(net_chunkNumber));
-                            int32_t dataSize    = static_cast<int32_t>(ntohl(net_dataSize));
-
-                            // Basic sanity checks
-                            if (dataSize < 0 || dataSize > 10 * 1024 * 1024) {
-                                std::cerr << "[ERROR] Invalid header from socket " << sock
-                                        << " fileID=" << fileID
-                                        << " chunk=" << chunkNumber
-                                        << " dataSize=" << dataSize << ". Dropping sender.\n";
-                                done.insert(sock);
-                                if (remaining > 0) --remaining;
-                                continue;
-                            }
-
-                            // End-of-transmission marker
-                            if (chunkNumber == -1 && dataSize == 0) {
-                                std::cout << "End of transmission from client socket " << sock
-                                        << " for FileID=" << fileID << std::endl;
-                                done.insert(sock);
-                                if (remaining > 0) --remaining;
-                                continue;
-                            }
-
-                            // Receive the payload exactly dataSize bytes
-                            // Receive the payload exactly dataSize bytes
-                            // Receive the payload exactly dataSize bytes
-                            std::vector<char> chunkData(dataSize);
-                            ssize_t totalReceived = recvAll(sock, chunkData.data(), dataSize);
-                            if (totalReceived != dataSize) {
-                                std::cerr << "[ERROR] Socket " << sock
-                                        << " lost connection while receiving chunk "
-                                        << chunkNumber << " (got "
-                                        << totalReceived << "/" << dataSize << ")\n";
-                                done.insert(sock);
-                                if (remaining > 0) --remaining;
-                                continue;
-                            }
-
-                            // At this point we have the full chunk, write it
-                            file.appendToFile(realName.c_str(),
-                                            chunkData.data(),
-                                            static_cast<size_t>(totalReceived),
-                                            filePath.c_str(),
-                                            fileID,
-                                            chunkNumber);
-
-                            std::cerr << "[RECV] fileID=" << fileID
-                                    << " chunk=" << chunkNumber
-                                    << " size=" << totalReceived
-                                    << " offset=" << (chunkNumber * 32)
-                                    << std::endl;
-
-                            // Send ACK back so client knows it can send next chunk (client waits for ACK)
-                            const char* ack = "ACK";
-                            ssize_t sret = send(sock, ack, strlen(ack), 0);
-                            if (sret <= 0) {
-                                std::cerr << "[WARN] Failed to send ACK to socket " << sock << " (send returned " << sret << "). Marking sender done.\n";
-                                done.insert(sock);
-                                if (remaining > 0) --remaining;
-                            }
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        else if (userInput == 3) {
-            //reference number of packets received from 2
-
-            int placeHolderForPackets = 225;
-            int placeHolderForTotalPackets = 311;
-            std::cout << "Download status:" << std::endl;
-            std::cout << "fileName\t" << placeHolderForPackets*32 << "/" << placeHolderForTotalPackets*32 << std::endl; 
-            
-            
-        }
-        else if (userInput == 4) {
             std::cout << "Closing server..." << std::endl;
             pthread_mutex_lock(&ctx.lock);
             for (int sock : ctx.clients) {

@@ -13,7 +13,7 @@
 
 #include "./lib/fileManager.h"
 
-#pragma pack(push, 1)   // disable padding
+#pragma pack(push, 1)
 struct ChunkPacketHeader {
     int fileID;
     int chunkNumber;
@@ -30,7 +30,7 @@ ssize_t recvAll_client(int sock, void* buffer, size_t length) {
             total += bytes;
             continue;
         }
-        if (bytes == 0) return 0; // peer closed
+        if (bytes == 0) return 0;
         if (errno == EINTR) continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -48,11 +48,10 @@ int main()
 {
     myFile file;
     string filePath = "./DummyFiles/seed";
-    // creating socket
+
     int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
     int PORTS[5] = {8080, 8081, 8082, 8083, 8084};
 
-    // specifying address
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
 
@@ -63,7 +62,6 @@ int main()
             serverAddress.sin_port = htons(PORTS[x]);
             serverAddress.sin_addr.s_addr = INADDR_ANY;
 
-            // sending connection request
             if (connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) == 0) {
                 std::cout << "client is starting at port " << PORTS[x] << std::endl;
                 isNotConnected = 0;
@@ -82,13 +80,13 @@ int main()
 
     int userInput = 0;
     while(true) {
-        char buffer[1024] = { 0 }; //increase to accept more data later
+        char buffer[1024] = { 0 };
         int bytesReceived = recv(clientSocket, buffer, sizeof(buffer), 0);
         if(bytesReceived <= 0) {
             continue;
         }
         else {
-            buffer[bytesReceived] = '\0'; // make sure it's a string
+            buffer[bytesReceived] = '\0';
             std::cout << "Message from Server: " << buffer << std::endl;
 
             int userInput = atoi(buffer);
@@ -99,13 +97,12 @@ int main()
 
                 vector<vector<string>> listOfFiles = file.getIDFileList(filePath);
                 printFileList(listOfFiles);
-                //send(clientSocket, &listOfFiles, listOfFiles.size(), 0);
 
                 string serialized = serialize2DVector(listOfFiles);
                 send(clientSocket, serialized.c_str(), serialized.size(), 0);
             }
             if(userInput == 2) {
-                char chunkAssignmentBuffer[2048] = { 0 }; //increase to accept more data later
+                char chunkAssignmentBuffer[2048] = { 0 };
                 while(true) {
                     int chunkAssignmentReceived = recv(clientSocket, chunkAssignmentBuffer, sizeof(chunkAssignmentBuffer), 0);
                     if (chunkAssignmentReceived <= 0) {
@@ -171,8 +168,7 @@ int main()
                             break;
                         }
 
-                        // --- WAIT FOR SERVER ACK ---
-                        char ackBuf[4] = {0}; // 3 bytes + null
+                        char ackBuf[4] = {0};
                         ssize_t ackRecv = recvAll_client(clientSocket, ackBuf, 3);
                         if (ackRecv == 3) {
                             ackBuf[3] = '\0';
@@ -185,8 +181,7 @@ int main()
                             std::cerr << "[ERROR] Server closed connection while waiting for ACK\n";
                             break;
                         } else {
-                            std::cerr << "[ERROR] recvAll_client for ACK returned " << ackRecv
-                                    << " (errno=" << errno << ")\n";
+                            std::cerr << "[ERROR] recvAll_client for ACK returned " << ackRecv << " (errno=" << errno << ")\n";
                             break;
                         }
                     }
@@ -200,10 +195,6 @@ int main()
                     break;
                 }
             }
-            if(userInput == 3) {
-                //download status
-                //might need to send info aside from the file itself
-            }
             if(userInput == 4) {
                 //add code to close socket ports
                 break;
@@ -215,7 +206,6 @@ int main()
 
     // closing socket
     close(clientSocket);
-
     return 0;
 }
 
